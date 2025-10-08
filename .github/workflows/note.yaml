@@ -147,7 +147,7 @@ jobs:
       - name: Install AI SDK
         run: |
           npm init -y
-          npm i ai @ai-sdk/anthropic
+          npm i ai @anthropic-ai/claude-agent-sdk
 
       - name: Restore research
         env:
@@ -160,7 +160,7 @@ jobs:
         run: |
           cat > write.mjs <<'EOF'
           import { generateText } from 'ai';
-          import { anthropic } from '@ai-sdk/anthropic';
+          import { anthropic } from '@anthropic-ai/claude-agent-sdk';
           import fs from 'fs';
           const theme=process.env.THEME||''; const target=process.env.TARGET||''; const message=process.env.MESSAGE||''; const cta=process.env.CTA||'';
           const inputTags=(process.env.INPUT_TAGS||'').split(',').map(s=>s.trim()).filter(Boolean);
@@ -236,7 +236,7 @@ jobs:
       - name: Install AI SDK
         run: |
           npm init -y
-          npm i ai @ai-sdk/anthropic
+          npm i ai @anthropic-ai/claude-agent-sdk
 
       - name: Restore draft json
         env:
@@ -249,7 +249,7 @@ jobs:
         run: |
           cat > factcheck.mjs <<'EOF'
           import { generateText } from 'ai';
-          import { anthropic } from '@ai-sdk/anthropic';
+          import { anthropic } from '@anthropic-ai/claude-agent-sdk';
           import fs from 'fs';
           const draft=JSON.parse(fs.readFileSync('.note-artifacts/draft.json','utf8'));
           const modelName='claude-sonnet-4-5-20250929';
