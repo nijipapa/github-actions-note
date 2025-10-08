@@ -82,7 +82,7 @@ jobs:
         run: |
           set -euo pipefail
           npm init -y >/dev/null 2>&1 || true
-          npm i @anthropic-ai/claude-agent-sdk@0.6.1 @anthropic-ai/sdk@0.24.0
+          npm i @anthropic-ai/claude-agent-sdk@0.5.1 @anthropic-ai/sdk@0.24.0
 
       - name: Research with Claude Agent SDK (robust)
         run: |
