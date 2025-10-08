@@ -42,12 +42,11 @@ permissions:
 
 env:
   TZ: Asia/Tokyo
-  # ここだけでモデルを定義（各job/stepへ自動継承）
-  CLAUDE_MODEL: claude-3-5-sonnet-20241022
+  CLAUDE_MODEL: claude-3-5-sonnet-20241022  # 利用可能なモデルに合わせて必要なら変更
 
 jobs:
   research:
-    name: Research (CCSDK WebSearch/WebFetch)
+    name: Research (no Agent SDK)
     runs-on: ubuntu-latest
     env:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -56,104 +55,74 @@ jobs:
     outputs:
       research_b64: ${{ steps.collect.outputs.research_b64 }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: '20.x'
           cache: 'npm'
 
-      - name: Preflight check (keys & model)
+      - name: Preflight check
         run: |
           set -euo pipefail
-          if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
-            echo "::error::ANTHROPIC_API_KEY が未設定です。Settings→Secrets→Actions に追加してください。"
-            exit 2
-          fi
-          if [ -z "${CLAUDE_MODEL:-}" ]; then
-            echo "::error::CLAUDE_MODEL が空です。トップレベル env に設定してください。"
-            exit 2
-          fi
-          echo "Keys/Model OK"
+          [ -n "${ANTHROPIC_API_KEY:-}" ] || (echo "::error::ANTHROPIC_API_KEY 未設定" && exit 2)
+          [ -n "${CLAUDE_MODEL:-}" ] || (echo "::error::CLAUDE_MODEL 未設定" && exit 2)
 
-      - name: Install Claude Agent SDK (pinned)
+      - name: Install SDKs
         run: |
-          set -euo pipefail
           npm init -y >/dev/null 2>&1 || true
-          npm i @anthropic-ai/claude-agent-sdk@0.5.1 @anthropic-ai/sdk@0.24.0
+          npm i @anthropic-ai/sdk@0.24.0
 
-      - name: Research with Claude Agent SDK (robust)
+      - name: Research with Anthropic SDK
         run: |
           set -euo pipefail
           mkdir -p .note-artifacts
           cat > research.mjs <<'EOF'
-          import { createClient } from "@anthropic-ai/sdk";
+          import Anthropic from "@anthropic-ai/sdk";
           import fs from "fs/promises";
 
+          const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+          const model = process.env.CLAUDE_MODEL;
           const THEME = process.env.THEME || '';
           const TARGET = process.env.TARGET || '';
-          const MODEL = process.env.CLAUDE_MODEL || '';
           const today = new Date().toISOString().slice(0,10);
 
-          // 下位SDK疎通確認
-          const base = createClient({ apiKey: process.env.ANTHROPIC_API_KEY });
-          try {
-            await base.messages.create({
-              model: MODEL, max_tokens: 64,
-              messages: [{ role: "user", content: "ping" }],
-            });
-          } catch (e) {
-            console.error("SDK connectivity failed:", e?.message ?? e);
-            process.exit(3);
-          }
+          const system = [
+            "あなたは一次情報を優先して要約する上級リサーチャーです。",
+            "本文中にMarkdownリンクで出典を埋め込みます。",
+            "不明点は「前提と仮定」で明示して続行します。"
+          ].join("\\n");
 
-          // Agent SDK 本処理
-          try {
-            const { Agent } = await import("@anthropic-ai/claude-agent-sdk");
-            const agent = new Agent({
-              apiKey: process.env.ANTHROPIC_API_KEY,
-              model: MODEL,
-            });
+          const prompt = `以下条件でnote用の下調べレポートを作成してください（見出し・箇条書き含む）。
+          - テーマ: ${THEME}
+          - 想定読者: ${TARGET}
+          - 目的: 後続ライティングに使う一次情報ダイジェスト
+          - 現在日付: ${today}
+          本文中にMarkdownリンクで出典を埋め込んでください。`;
 
-            const sys = [
-              'あなたは一次情報の要約に長けた上級リサーチャーです。',
-              '出典は本文にMarkdownリンクで埋め込むこと。',
-              '不明点は「前提と仮定」で明示して続行すること。'
-            ].join('\n');
+          const res = await client.messages.create({
+            model,
+            max_tokens: 6000,
+            system,
+            messages: [{ role: "user", content: prompt }],
+          });
 
-            const prompt = `以下条件でnote用の下調べレポートを作成してください（見出し・箇条書き含む）。
-            - テーマ: ${THEME}
-            - 想定読者: ${TARGET}
-            - 目的: 後続ライティングに使う一次情報ダイジェスト
-            - 現在日付: ${today}
-            可能な限り一次情報を優先し、本文内にMarkdownリンクで出典を埋め込んでください。`;
-
-            const res = await agent.run(prompt, { system: sys });
-            const text = String(res?.output ?? '').trim();
-
-            await fs.mkdir('.note-artifacts', { recursive: true });
-            await fs.writeFile('.note-artifacts/research.md', text);
-            console.log("Research generated: .note-artifacts/research.md");
-            process.exit(0);
-          } catch (err) {
-            console.error("Claude Agent SDK error:", err?.message ?? err);
-            process.exit(10);
-          }
+          // text 抜き出し
+          const parts = res.content?.map(p => p.type === "text" ? p.text : "").join("\n") || "";
+          await fs.writeFile(".note-artifacts/research.md", parts.trim());
+          console.log("Research generated");
           EOF
           node --unhandled-rejections=strict research.mjs
 
-      - name: Collect research
-        id: collect
+      - id: collect
+        name: Collect research
         run: |
           b64=$(base64 -w 0 .note-artifacts/research.md 2>/dev/null || base64 .note-artifacts/research.md)
           echo "research_b64<<EOF" >> $GITHUB_OUTPUT
           echo "$b64" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
-      - name: Upload research artifacts
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: research-artifacts
           path: .note-artifacts/research.md
@@ -173,11 +142,9 @@ jobs:
       title: ${{ steps.collect.outputs.title }}
       draft_json_b64: ${{ steps.collect.outputs.draft_json_b64 }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: '20.x'
           cache: 'npm'
@@ -185,7 +152,7 @@ jobs:
       - name: Install AI SDK
         run: |
           npm init -y >/dev/null 2>&1 || true
-          npm i ai @anthropic-ai/claude-agent-sdk@0.6.1 @anthropic-ai/sdk@0.24.0
+          npm i ai @ai-sdk/anthropic @anthropic-ai/sdk@0.24.0
 
       - name: Restore research
         env:
@@ -197,9 +164,9 @@ jobs:
       - name: Generate draft (title/body/tags)
         run: |
           cat > write.mjs <<'EOF'
-          import { generateText } from 'ai';
-          import { anthropic } from '@anthropic-ai/claude-agent-sdk';
-          import fs from 'fs';
+          import { generateText } from "ai";
+          import { anthropic } from "@ai-sdk/anthropic";
+          import fs from "fs";
 
           const theme=process.env.THEME||'';
           const target=process.env.TARGET||'';
@@ -218,7 +185,7 @@ jobs:
           }
           async function repairJson(raw){
             const sys='入力から {"title":string,"draftBody":string,"tags":string[]} のJSONのみ返答。';
-            const {text}=await generateText({model:anthropic(modelName),system:sys,prompt:String(raw),temperature:0,maxTokens:8000});
+            const {text}=await generateText({model:anthropic({apiKey:process.env.ANTHROPIC_API_KEY})(modelName),system:sys,prompt:String(raw),temperature:0,maxTokens:8000});
             return extractJsonFlexible(text||'');
           }
           function sanitizeTitle(s){
@@ -235,8 +202,10 @@ jobs:
           const sysWrite='note.com向け長文記事の生成。JSON {title,draftBody,tags[]} で返答。draftBodyは6000〜9000文字目安。';
           const prompt=[`{テーマ}: ${theme}`,`{ペルソナ}: ${target}`,`{リサーチ}: ${researchReport}`,`{メッセージ}: ${message}`,`{CTA}: ${cta}`].join('\n');
 
-          const {text}=await generateText({model:anthropic(modelName),system:sysWrite,prompt,temperature:0.7,maxTokens:30000});
+          const provider = anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+          const {text}=await generateText({model:provider(modelName),system:sysWrite,prompt,temperature:0.7,maxTokens:30000});
           let obj=extractJsonFlexible(text||'')||await repairJson(text||'');
+
           let title, draftBody, tags;
           if(obj){ title=sanitizeTitle(obj.title); draftBody=String(obj.draftBody||'').trim(); tags=Array.isArray(obj.tags)?obj.tags.map(String):[] }
           if(!title||!draftBody){ title=deriveTitleFromText(text||''); const lines=(text||'').split(/\r?\n/); draftBody=lines.slice(1).join('\n').trim()||(text||''); tags=[] }
@@ -245,8 +214,8 @@ jobs:
           EOF
           node write.mjs
 
-      - name: Collect draft
-        id: collect
+      - id: collect
+        name: Collect draft
         run: |
           title=$(node -e "console.log(JSON.parse(require('fs').readFileSync('.note-artifacts/draft.json','utf8')).title)")
           b64=$(base64 -w 0 .note-artifacts/draft.json 2>/dev/null || base64 .note-artifacts/draft.json)
@@ -257,8 +226,7 @@ jobs:
           echo "$b64" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
-      - name: Upload draft artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: draft-artifact
           path: .note-artifacts/draft.json
@@ -275,11 +243,9 @@ jobs:
       title: ${{ steps.collect.outputs.title }}
       final_b64: ${{ steps.collect.outputs.final_b64 }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: '20.x'
           cache: 'npm'
@@ -287,7 +253,7 @@ jobs:
       - name: Install AI SDK
         run: |
           npm init -y >/dev/null 2>&1 || true
-          npm i ai @anthropic-ai/claude-agent-sdk@0.6.1 @anthropic-ai/sdk@0.24.0
+          npm i ai @ai-sdk/anthropic @anthropic-ai/sdk@0.24.0
 
       - name: Restore draft json
         env:
@@ -299,9 +265,9 @@ jobs:
       - name: Fact-check with Tavily
         run: |
           cat > factcheck.mjs <<'EOF'
-          import { generateText } from 'ai';
-          import { anthropic } from '@anthropic-ai/claude-agent-sdk';
-          import fs from 'fs';
+          import { generateText } from "ai";
+          import { anthropic } from "@ai-sdk/anthropic";
+          import fs from "fs";
 
           const draft=JSON.parse(fs.readFileSync('.note-artifacts/draft.json','utf8'));
           const modelName=process.env.CLAUDE_MODEL;
@@ -324,7 +290,8 @@ jobs:
 
           async function proposeQueries(body){
             const sys='あなたは事実検証の専門家です。入力本文から検証が必要な固有名詞・数値・主張を抽出し、Tavily検索用に日本語の検索クエリを最大10件の配列で返してください。出力はJSON配列のみ。';
-            const { text } = await generateText({ model: anthropic(modelName), system: sys, prompt: String(body), temperature: 0, maxTokens: 2000 });
+            const provider = anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+            const { text } = await generateText({ model: provider(modelName), system: sys, prompt: String(body), temperature: 0, maxTokens: 2000 });
             const arr = extractJsonFlexible(text||'');
             return Array.isArray(arr) ? arr.map(String).filter(Boolean).slice(0,10) : [];
           }
@@ -364,8 +331,9 @@ jobs:
               'あなたは事実検証の専門家です。以下の原稿（note下書き）に対し、提供エビデンスに基づき誤情報修正・一次情報リンク付与を行い、修正後本文のみ返答。',
               '文体・構成は可能な限り維持。必要なら末尾に参考文献セクション追記。'
             ].join('\n');
+            const provider = anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
             const prompt = ['## 原稿', String(draft.draftBody||''), '', '## エビデンス', evidence].join('\n\n');
-            const { text } = await generateText({ model: anthropic(modelName), system: sys, prompt, temperature: 0.3, maxTokens: 30000 });
+            const { text } = await generateText({ model: provider(modelName), system: sys, prompt, temperature: 0.3, maxTokens: 30000 });
             let body = stripCodeFence(text||'');
             let title = process.env.TITLE || draft.title || '';
             let tags = Array.isArray(draft.tags)? draft.tags: [];
@@ -386,14 +354,13 @@ jobs:
           EOF
           node factcheck.mjs
 
-      - name: Upload final artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: final-artifact
           path: .note-artifacts/final.json
 
-      - name: Collect final
-        id: collect
+      - id: collect
+        name: Collect final
         run: |
           title=$(node -e "console.log(JSON.parse(require('fs').readFileSync('.note-artifacts/final.json','utf8')).title)")
           b64=$(base64 -w 0 .note-artifacts/final.json 2>/dev/null || base64 .note-artifacts/final.json)
@@ -416,11 +383,9 @@ jobs:
     outputs:
       final_url: ${{ steps.publish.outputs.published_url || steps.publish.outputs.draft_url }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: '20.x'
           cache: 'npm'
@@ -484,9 +449,7 @@ jobs:
 
           if(!fs.existsSync(STATE_PATH)){ console.error('storageState not found:', STATE_PATH); process.exit(1); }
 
-          const ssDir=path.join(os.tmpdir(),'note-screenshots');
-          fs.mkdirSync(ssDir,{recursive:true});
-          const SS_PATH=path.join(ssDir,`note-post-${nowStr()}.png`);
+          const ssDir=path.join(os.tmpdir(),'note-screenshots'); fs.mkdirSync(ssDir,{recursive:true}); const SS_PATH=path.join(ssDir,`note-post-${nowStr()}.png`);
 
           function sanitizeTitle(t){
             let s=String(t||'').trim();
@@ -588,8 +551,7 @@ jobs:
           if [ -n "$draft" ]; then echo "draft_url=$draft" >> $GITHUB_OUTPUT; fi
           if [ -n "$shot" ]; then echo "screenshot=$shot" >> $GITHUB_OUTPUT; fi
 
-      - name: Upload screenshot (if any)
-        if: ${{ steps.publish.outputs.screenshot != '' }}
+      - if: ${{ steps.publish.outputs.screenshot != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: note-screenshot
